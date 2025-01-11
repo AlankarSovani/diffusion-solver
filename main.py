@@ -10,7 +10,7 @@ time_step = 0.1
 x = np.linspace(0, 1000, int(10 / time_step))
 y = np.linspace(0, 1000, int(10 / time_step))
 X, Y = np.meshgrid(x, y)
-hmap = np.sin(0.01*X) * np.cos(0.01*Y)  # Example 2D data
+hmap = np.sin(0.01*X)  # Example 2D data
 
 # Create plots (I let AI decide what this would look like)
 fig, ax = plt.subplots()
