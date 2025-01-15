@@ -1,27 +1,29 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from numba import njit, prange, cuda
+from numba import cuda
 import time
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 
 # Initialize parameters
-time_step = 0.1
-x = np.linspace(0, 1000, 10)
-y = np.linspace(0, 1000, 10)
+steps = 10000
+time_step = 0.01
+grain = 4
+x = np.arange(0, 1001, grain)
+y = np.arange(0, 1001, grain)
 X, Y = np.meshgrid(x, y)
-f = lambda x: 2/(1+np.exp(-(x - 500)/10))-1
-hmap = f(X) * f(Y)  # Example 2D data
-hmap = np.sin(np.pi * X / 1000)
-k = 5  # Heat conductivity
+# f = lambda x: 2/(1+np.exp(-(x - 500)/10))-1
+# hmap = f(X) * f(Y)  # Example 2D data
+hmap = np.sin(np.pi * X * 3 / 1000) * np.sin(np.pi * Y * 3 / 1000)
+k = 100  # Heat conductivity
 # Create plots (I let AI decide what this would look like)
 fig, ax = plt.subplots()
 plt.subplots_adjust(bottom=0.25)
 cax = ax.pcolormesh(X, Y, hmap, shading='auto', cmap='hot')
 # Create the slider
 ax_slider = plt.axes([0.25, 0.1, 0.65, 0.03])
-time_slider = Slider(ax_slider, 'Time', 0, 1000, valinit=0)
+time_slider = Slider(ax_slider, 'Time', 0, 100, valinit=0)
 
 # Update function
 def update(val):
@@ -29,78 +31,50 @@ def update(val):
     cax.set_array(hmaps_arr[int(current_time/time_step)].ravel())
     fig.canvas.draw_idle()
 
-# naive implementation of the laplacian function
 
-# def laplacian(array):
-#     gx, gy = np.gradient(array)
-#     gxx, gxy = np.gradient(gx)
-#     gyx, gyy = np.gradient(gy)
-#     lap = gxx + gyy
-#     for i in range(len(lap)): # no heat is lost on the boundary
-#         lap[0][i] = 0
-#         lap[i][0] = 0
-#         lap[-1][i] = 0
-#         lap[i][-1] = 0
-#     return lap
+@cuda.jit
+def custom_laplacian_gpu(array, lap): # does not compute the laplacian for the boundary since no heat is lost on the boundary.
+    i, j = cuda.grid(2)
+    if i < array.shape[0] and j < array.shape[1]:
+        if i == 0:
+            top = array[i + 1, j]
+        else: 
+            top = array[i - 1, j]
+        if i == array.shape[0] - 1:
+            bottom = array[i - 1, j]
+        else:
+            bottom = array[i + 1, j]
+        if j == 0:
+            left = array[i, j + 1]
+        else:
+            left = array[i, j - 1]
+        if j == array.shape[1] - 1:
+            right = array[i, j - 1]
+        else:
+            right = array[i, j + 1]
+        lap[i, j] = (top + bottom + left + right - 4 * array[i, j])/(grain**2)
+     # discrete difference laplacian
 
 
-# slow implementation of the iterate function
-# def iterate(hmap):
-#     new_hmap = hmap.copy()
-#     hmaps_arr = [new_hmap]
-#     for i in range (int(1000/time_step)):
-#         hmaps_arr.append(hmaps_arr[i] + time_step * laplacian(hmaps_arr[i]))
-#     return hmaps_arr
-
-
-
-
-@njit
-def custom_gradient(array): # does not calculate the gradient on the boundary as no heat is lost on the boundary. saves computations.
-    grad = np.zeros_like(array)
-    for i in prange(1, array.shape[0] - 1):
-        for j in range(1, array.shape[1] - 1):
-            grad[i, j] = (array[i + 1, j] - array[i - 1, j]) / 2, (array[i, j + 1] - array[i, j - 1]) / 2 # discrete difference gradient
-    return grad
-
-@njit
-def custom_laplacian(array): # does not compute the laplacian for the boundary since no heat is lost on the boundary.
-    lap = np.zeros_like(array)
-    for i in prange(1, array.shape[0] - 1):
-        for j in range(1, array.shape[1] - 1):
-            # define top, bottom, left, right
-            if i == 0:
-                top = array[i + 1, j]
-            else: 
-                top = array[i - 1, j]
-            if i == array.shape[0] - 1:
-                bottom = array[i - 1, j]
-            else:
-                bottom = array[i + 1, j]
-            if j == 0:
-                left = array[i, j + 1]
-            else:
-                left = array[i, j - 1]
-            if j == array.shape[1] - 1:
-                right = array[i, j - 1]
-            else:
-                right = array[i, j + 1]
-            lap[i, j] = top + bottom + left + right - 4 * array[i, j] # discrete difference laplacian
-    return lap
-
-@njit
 def iterate(hmap, time_step, num_steps): # this function is only called on compilation, so we can create variables inside the function
     new_hmap = hmap.copy()
     hmaps_arr = np.empty((num_steps + 1, *hmap.shape))
     hmaps_arr[0] = new_hmap
-    for i in prange(num_steps):
-        lap = custom_laplacian(hmaps_arr[i]) # may call njit functions inside of an njit function
-        hmaps_arr[i + 1] = hmaps_arr[i] + time_step * lap
+    for i in range(num_steps):
+        threadsperblock = (16, 16)
+        blockspergrid_x = (new_hmap.shape[0] + (threadsperblock[0] - 1)) // threadsperblock[0]
+        blockspergrid_y = (new_hmap.shape[1] + (threadsperblock[1] - 1)) // threadsperblock[1]
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+        lap = np.zeros_like(hmaps_arr[i])
+        d_lap = cuda.to_device(lap)
+        custom_laplacian_gpu[blockspergrid, threadsperblock](hmaps_arr[i], d_lap)
+        lap = d_lap.copy_to_host()
+        hmaps_arr[i + 1] = hmaps_arr[i] + time_step * lap * k
     return hmaps_arr
 
 
 start = time.time() 
-hmaps_arr = iterate(hmap, 0.01, 10000)
+hmaps_arr = iterate(hmap, time_step, steps)
 print('Elapsed time: ', time.time() - start)
 # Attach the update function to the slider
 time_slider.on_changed(update)
@@ -114,9 +88,9 @@ def animate(frame):
 
 plt.show()
 start_animate = time.time()
-frame_skip = 5
+frame_skip = 10
 frames = np.arange(0, len(hmaps_arr), frame_skip)
 ani = FuncAnimation(fig, animate, frames=frames, interval=20, blit=True)
-writer = FFMpegWriter(fps=240, metadata=dict(artist='Me'), bitrate=1800)
+writer = FFMpegWriter(fps=120, metadata=dict(artist='Me'), bitrate=1800)
 ani.save("heat.mp4", writer=writer)
 print('Animation took: ', time.time() - start_animate, ' seconds')

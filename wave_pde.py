@@ -22,7 +22,7 @@ def iterate(wmap, time_step, num_steps):
     wmaps_arr = np.empty((num_steps, *wmap.shape))
     wmaps_arr[0] = wmap.copy()
     t_derivatives_arr = np.empty_like(wmaps_arr)
-    threadsperblock = 32
+    threadsperblock = 16
     blockspergrid = (wmap.size + (threadsperblock - 1)) // threadsperblock
     start_iterations = time.time()
     for i in range(1, num_steps):
