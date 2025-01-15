@@ -1,22 +1,24 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from numba import njit
-from numba import prange
+from numba import njit, prange, cuda
+import time
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 
 # Initialize parameters
 time_step = 0.1
-x = np.linspace(0, 1000, int(10 / time_step))
-y = np.linspace(0, 1000, int(10 / time_step))
+x = np.linspace(0, 1000, 10)
+y = np.linspace(0, 1000, 10)
 X, Y = np.meshgrid(x, y)
-hmap = np.sin(0.01*X)  # Example 2D data
-
+f = lambda x: 2/(1+np.exp(-(x - 500)/10))-1
+hmap = f(X) * f(Y)  # Example 2D data
+hmap = np.sin(np.pi * X / 1000)
+k = 5  # Heat conductivity
 # Create plots (I let AI decide what this would look like)
 fig, ax = plt.subplots()
 plt.subplots_adjust(bottom=0.25)
 cax = ax.pcolormesh(X, Y, hmap, shading='auto', cmap='hot')
-
 # Create the slider
 ax_slider = plt.axes([0.25, 0.1, 0.65, 0.03])
 time_slider = Slider(ax_slider, 'Time', 0, 1000, valinit=0)
@@ -66,7 +68,24 @@ def custom_laplacian(array): # does not compute the laplacian for the boundary s
     lap = np.zeros_like(array)
     for i in prange(1, array.shape[0] - 1):
         for j in range(1, array.shape[1] - 1):
-            lap[i, j] = array[i + 1, j] + array[i - 1, j] + array[i, j + 1] + array[i, j - 1] - 4 * array[i, j] # discrete difference laplacian
+            # define top, bottom, left, right
+            if i == 0:
+                top = array[i + 1, j]
+            else: 
+                top = array[i - 1, j]
+            if i == array.shape[0] - 1:
+                bottom = array[i - 1, j]
+            else:
+                bottom = array[i + 1, j]
+            if j == 0:
+                left = array[i, j + 1]
+            else:
+                left = array[i, j - 1]
+            if j == array.shape[1] - 1:
+                right = array[i, j - 1]
+            else:
+                right = array[i, j + 1]
+            lap[i, j] = top + bottom + left + right - 4 * array[i, j] # discrete difference laplacian
     return lap
 
 @njit
@@ -77,15 +96,27 @@ def iterate(hmap, time_step, num_steps): # this function is only called on compi
     for i in prange(num_steps):
         lap = custom_laplacian(hmaps_arr[i]) # may call njit functions inside of an njit function
         hmaps_arr[i + 1] = hmaps_arr[i] + time_step * lap
-        # No heat is lost on the boundary
-        hmaps_arr[i + 1][0, :] = 0
-        hmaps_arr[i + 1][:, 0] = 0
-        hmaps_arr[i + 1][-1, :] = 0
-        hmaps_arr[i + 1][:, -1] = 0
     return hmaps_arr
 
 
-hmaps_arr = iterate(hmap, 0.1, 10000)
+start = time.time() 
+hmaps_arr = iterate(hmap, 0.01, 10000)
+print('Elapsed time: ', time.time() - start)
 # Attach the update function to the slider
 time_slider.on_changed(update)
+
+
+
+def animate(frame):
+    cax.set_array(hmaps_arr[frame].ravel())
+    return cax,
+
+
 plt.show()
+start_animate = time.time()
+frame_skip = 5
+frames = np.arange(0, len(hmaps_arr), frame_skip)
+ani = FuncAnimation(fig, animate, frames=frames, interval=20, blit=True)
+writer = FFMpegWriter(fps=240, metadata=dict(artist='Me'), bitrate=1800)
+ani.save("heat.mp4", writer=writer)
+print('Animation took: ', time.time() - start_animate, ' seconds')
